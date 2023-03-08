@@ -141,35 +141,63 @@ async def accumulate(
             yield value
 
 
-async def chain(*iterables: AnyIterable[T]) -> AsyncIterator[T]:
+@public_module(__name__, "chain")
+class Chain(AsyncIterator[T]):
     """
-    An :term:`asynchronous iterator` flattening values from all ``iterables``
+    An :term:`asynchronous iterator` flattening values from all (async) ``iterables``
 
     The resulting iterator consecutively iterates over and yields all values from
     each of the ``iterables``. This is similar to converting all ``iterables`` to
     sequences and concatenating them, but lazily exhausts each iterable.
     """
-    for iterable in iterables:
-        async with ScopedIter(iterable) as iterator:
-            async for item in iterator:
-                yield item
+    __slots__ = ("_args_iterables", "_iter_iterables", "_iterator")
 
+    def __init__(
+        self,
+        *iterables: AnyIterable[T],
+        _iter_iterables: Optional[AnyIterable[AnyIterable[T]]] = None
+    ):
+        # we iterate destructively, so we need to pop (list) from the start ([::-1])
+        self._args_iterables = list(iterables)[::-1]
+        self._iter_iterables = _iter_iterables
+        self._iterator = self._iter()
 
-@public_module(__name__, "chain.from_iterable")
-async def chain_from_iterable(
-    iterable: AnyIterable[AnyIterable[T]],
-) -> AsyncIterator[T]:
-    """
-    Alternate constructor for :py:func:`~.chain` that lazily exhausts iterables as well
-    """
-    async with ScopedIter(iterable) as iterables:
-        async for sub_iterable in iterables:
-            async with ScopedIter(sub_iterable) as iterator:
+    @classmethod
+    def from_iterable(
+        cls,
+        iterable: AnyIterable[AnyIterable[T]],
+    ) -> AsyncIterator[T]:
+        """
+        Alternate constructor to lazily fetch ``iterables`` from an (async) ``iterable``
+        """
+        return cls(_iter_iterables=iterable)
+
+    async def _iterables(self) -> AsyncIterator[AnyIterable[T]]:
+        assert (
+            self._iter_iterables is None or not self._args_iterables
+        ), "Support for both *iterables and from_iterable is not guaranteed"
+        while self._args_iterables:
+            yield self._args_iterables.pop()
+        if self._iter_iterables is None:
+            return
+        async with ScopedIter(self._iter_iterables) as iterables:
+            async for iterable in iterables:
+                yield iterable
+
+    async def _iter(self) -> AsyncIterator[T]:
+        async for iterable in self._iterables():
+            async with ScopedIter(iterable) as iterator:
                 async for item in iterator:
                     yield item
 
+    def __aiter__(self) -> AsyncIterator[T]:
+        return self._iterator
 
-chain.from_iterable = chain_from_iterable  # type: ignore
+    def __anext__(self) -> Awaitable[T]:
+        return self._iterator.__anext__()
+
+
+chain = Chain
 
 
 async def compress(
